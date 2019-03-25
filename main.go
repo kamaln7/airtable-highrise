@@ -1,81 +1,76 @@
 package main
 
 import (
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/fabioberger/airtable-go"
-	"github.com/kamaln7/airtable-highrise/highrise"
+	"github.com/satori/go.uuid"
 )
 
 var (
-	highriseTeam  = flag.String("highrise.team", "", "highrise team name")
-	highriseKey   = flag.String("highrise.key", "", "highrise API key")
 	airtableBase  = flag.String("airtable.base", "", "airtable base ID")
 	airtableKey   = flag.String("airtable.key", "", "airtable API key")
 	airtableTable = flag.String("airtable.table", "Contacts", "airtable table name")
+	outputPath    = flag.String("output.path", "", "path to output csv files. empty for stdout")
+	outputURL    = flag.String("output.url", "", "url to download output files")
 )
 
 type airtableContact struct {
 	ID     string
 	Fields struct {
-		First, Last, HighriseID string
+		First, Last, Email, Company, HighriseID string
 	}
 }
 
 func main() {
 	flag.Parse()
+	*outputPath = strings.TrimRight(*outputPath, "/")
+	*outputURL = strings.TrimRight(*outputURL, "/")
 
 	air, err := airtable.New(*airtableKey, *airtableBase)
 	if err != nil {
 		log.Fatalf("could not connect to airtable: %v\n", err)
 	}
 
-	hr := highrise.New(*highriseKey, *highriseTeam)
-
-	hrContacts, err := hr.GetContacts()
-	if err != nil {
-		log.Fatalf("could not get highrise contacts: %v\n", err)
-	}
-
 	var airContacts []airtableContact
 	err = air.ListRecords(*airtableTable, &airContacts, airtable.ListParameters{
 		FilterByFormula: "{Highrise ID} = ''",
-		Fields:          []string{"First", "Last"},
+		Fields:          []string{"First", "Last", "Email", "Company"},
 	})
 	if err != nil {
 		log.Fatalf("could not get airtable contacts: %v\n", err)
 	}
 
-	log.Printf("found %d airtable contacts without highrise info\n", len(airContacts))
-	for _, contact := range airContacts {
-		id := ""
-		for _, candidate := range hrContacts {
-			if candidate.First == contact.Fields.First && candidate.Last == contact.Fields.Last {
-				// found an existing highrise contact
-				id = candidate.ID
-				break
-			}
-		}
+	fmt.Fprintf(os.Stderr, "found %d airtable contacts without highrise info\n", len(airContacts))
 
-		if id == "" {
-			// create a new Highrise contact
-			hrContact, err := hr.CreateContact(contact.Fields.First, contact.Fields.Last)
-			if err != nil {
-				log.Printf("could not create new highrise contact (%s %s): %v\n", contact.Fields.First, contact.Fields.Last, err)
-				continue
-			}
-
-			id = hrContact.ID
-		}
-
-		err = air.UpdateRecord(*airtableTable, contact.ID, map[string]interface{}{"Highrise ID": id}, &contact)
+	output := os.Stdout
+	var filePath, fileName string
+	if *outputPath != "" {
+		fileName = fmt.Sprintf("contacts-%s.csv", uuid.Must(uuid.NewV4()))
+		filePath = fmt.Sprintf("%s/%s", *outputPath, fileName)
+		output, err = os.Create(filePath)
 		if err != nil {
-			log.Printf("could not update airtable record (%s %s): %v\n", contact.Fields.First, contact.Fields.Last, err)
-			continue
+			log.Fatalf("couldn't open file %s for writing: %v\n", filePath, err)
 		}
+	}
+	writer := csv.NewWriter(output)
+	defer writer.Flush()
+	writer.Write([]string{"First name", "Last name", "Company", "Email address - Work", "Tags"})
+	for _, contact := range airContacts {
+		str := []string{contact.Fields.First, contact.Fields.Last, contact.Fields.Company, contact.Fields.Email, "open-source"}
 
-		fmt.Printf("updated %s %s (highrise %s)\n", contact.Fields.First, contact.Fields.Last, id)
+		writer.Write(str)
+	}
+	if *outputPath != "" {
+		if *outputURL != "" {
+			fmt.Printf("Wrote CSV to %s/%s\n", *outputURL, fileName)
+		} else {
+			fmt.Printf("Wrote CSV to %s\n", filePath)
+		}
 	}
 }
